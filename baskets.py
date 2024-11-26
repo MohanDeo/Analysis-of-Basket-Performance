@@ -1,18 +1,19 @@
+import itertools
 import warnings
 
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import seaborn as sns
 import statsmodels.api as sm
-from scipy.stats import anderson, jarque_bera, normaltest, probplot, shapiro
-from statsmodels.formula.api import ols
+from scipy.stats import kstest
 from statsmodels.graphics.tsaplots import plot_acf, plot_pacf
-from statsmodels.stats.diagnostic import acorr_breusch_godfrey, het_arch, het_breuschpagan
-from statsmodels.stats.stattools import durbin_watson
+from statsmodels.stats.diagnostic import acorr_breusch_godfrey, het_breuschpagan
+from statsmodels.stats.diagnostic import acorr_ljungbox
+from statsmodels.tsa.arima.model import ARIMA
 from statsmodels.tsa.stattools import adfuller
 
 warnings.filterwarnings('ignore')
+
 
 def read_in_data():
     data = pd.read_csv(
@@ -59,7 +60,7 @@ def annualised_volatility(returns):
     return returns.std() * np.sqrt(252)
 
 
-def sharpe_ratio(returns, risk_free_rate=2):
+def sharpe_ratio(returns, risk_free_rate=0.02):
     mean_return = returns.mean() * 252
     volatility = returns.std() * np.sqrt(252)
     # We need to deal with the case where the volatility is effectively zero
@@ -68,14 +69,97 @@ def sharpe_ratio(returns, risk_free_rate=2):
     return (mean_return - risk_free_rate) / volatility
 
 
-def sortino_ratio(returns, risk_free_rate=2):
+def sortino_ratio(returns, risk_free_rate=0.02):
     mean_return = returns.mean() * 252
     negative_returns = returns[returns < 0]
-    downside_std = negative_returns.std() * np.sqrt(252)
-    # We need to deal with the case, where the downside standard deviation is effectively zero
-    if downside_std < 1e-8:
+    if len(negative_returns) == 0:
+        print("No negative returns")
         return np.nan
+    downside_std = negative_returns.std() * np.sqrt(252)
+    # We need to deal with the case where the downside standard deviation is effectively zero
+    if downside_std < 1e-8:
+        print("Downside standard deviation is effectively zero")
+        return np.nan
+    print("Mean return:", mean_return, "Risk free rate:", risk_free_rate,"Downside standard deviation:", downside_std)
     return (mean_return - risk_free_rate) / downside_std
+
+
+def select_best_arma_model(time_series, max_p=5, max_q=5, criterion='aic'):
+    p = range(0, max_p + 1)
+    q = range(0, max_q + 1)
+    pq = list(itertools.product(p, q))
+
+    best_score = np.inf
+    best_order = None
+    best_model = None
+    results = []
+
+    for order in pq:
+        if order == (0, 0):
+            continue
+        # We have confirmed the data is stationary, so use 0 for differencing order
+        model = ARIMA(time_series, order=(order[0], 0, order[1])).fit()
+        if criterion == 'aic':
+            score = model.aic
+        else:
+            score = model.bic
+        results.append({'order': order, 'AIC': model.aic, 'BIC': model.bic})
+        if score < best_score:
+            best_score = score
+            best_order = order
+            best_model = model
+
+    results_df = pd.DataFrame(results)
+    results_df = results_df.sort_values(by=criterion.upper())
+    return best_order, best_model, results_df
+
+
+def check_residuals(model, lags=20):
+    residuals = model.resid
+    lb_test = acorr_ljungbox(residuals, lags=[lags], return_df=True)
+    p_value = lb_test['lb_pvalue'].values[0]
+    print(f"Ljung-Box test p-value: {p_value}")
+    if p_value > 0.05:
+        print("Residuals appear to be white noise.")
+    else:
+        print("Residuals may not be white noise. Consider a different model.")
+
+
+def calculate_sharpe_from_arma_model(model, risk_free_rate=0.02):
+
+    mean_return = model.params.get('const', 0)
+    mean_return_annualised = mean_return * 252
+
+    sigma = np.sqrt(model.model.endog.var())
+    sigma_annualised = sigma * np.sqrt(252)
+
+    # Excess return
+    excess_return = mean_return_annualised - risk_free_rate
+
+    # Sharpe Ratio
+    sharpe_ratio = excess_return / sigma_annualised
+
+    return sharpe_ratio
+
+
+def simulate_returns(model, n_simulations=2000):
+    # We use the ARMA model to simulate returns here
+    simulated_returns = model.simulate(nsimulations=n_simulations)
+    return simulated_returns
+
+
+# def calculate_sortino_ratio_empirical(simulated_returns, risk_free_rate=0.02):
+#     # Here, we calculate the Sortino ratio from the distribution created with the ARMA model
+#     expected_return = np.mean(simulated_returns)
+#     negative_returns = simulated_returns[simulated_returns < 0]
+#     if len(negative_returns) == 0:
+#         return np.nan
+#     downside_std = negative_returns.std() * np.sqrt(252)
+#     # We need to deal with the case, where the downside standard deviation is effectively zero
+#     if downside_std < 1e-8:
+#         return np.nan
+#     sortino_ratio = (expected_return - risk_free_rate) / downside_std
+#     return sortino_ratio
 
 
 def excess_return(returns_qi, returns_spx):
@@ -93,20 +177,36 @@ def information_ratio(calculated_excess_return, calculated_tracking_err):
     return calculated_excess_return / calculated_tracking_err
 
 
-def regression_analysis(returns_qi, returns_spx):
+def regression_analysis(returns_qi, returns_spx, risk_free_rate=0.02, maxlags=5):
+    risk_free_rate_daily = risk_free_rate / 252
     # Could show a plot of this
     data = pd.concat([returns_qi, returns_spx], axis=1)
-    X = data['SPX_Return']
-    y = data['Qi_Return']
+    # Calculate excess returns
+    data['Excess_Qi_Return'] = data['Qi_Return'] - risk_free_rate_daily
+    data['Excess_SPX_Return'] = data['SPX_Return'] - risk_free_rate_daily
+
+    X = data['Excess_SPX_Return']
+    y = data['Excess_Qi_Return']
     X = sm.add_constant(X)
-    model = sm.OLS(y, X).fit()
-    # Should alpha be annualised?
+    model = sm.OLS(y, X).fit()#(cov_type='HAC', cov_kwds={'maxlags': maxlags})
+
     alpha_daily = model.params['const']
     alpha = (1 + alpha_daily) ** 252 - 1
 
-    beta = model.params['SPX_Return']
+    beta = model.params['Excess_SPX_Return']
     r_squared = model.rsquared
-    return alpha, beta, r_squared
+
+    coefficients = model.params
+    errors = model.bse
+    percentage_errors = []
+
+    for coef_name, coef_value, error in zip(coefficients.index, coefficients, errors):
+        percentage_error = (error / abs(coef_value)) * 100
+        percentage_errors.append(percentage_error)
+
+    alpha_p_value = model.pvalues['const']
+
+    return alpha, beta, r_squared, percentage_errors, alpha_p_value
 
 
 def main():
@@ -117,11 +217,15 @@ def main():
     five_years = data.loc[end_date - pd.DateOffset(years=5):end_date]
     inception = data
 
+    # periods = {
+    #     '1 Year': one_year,
+    #     '3 Years': three_years,
+    #     '5 Years': five_years,
+    #     'Inception': inception
+    # }
+
     periods = {
-        '1 Year': one_year,
-        '3 Years': three_years,
-        '5 Years': five_years,
-        'Inception': inception
+        '1 Year': one_year
     }
 
     results = {}
@@ -133,20 +237,20 @@ def main():
         mean_return_spx = mean_annual_return(spx_returns)
         mean_return_qi = mean_annual_return(qi_returns)
 
-        # Annualized Volatility
+        # Annualised Volatility
         vol_spx = annualised_volatility(spx_returns)
         vol_qi = annualised_volatility(qi_returns)
 
-        # Sharpe Ratio (Assuming risk-free rate is 0)
-        sharpe_spx = sharpe_ratio(mean_return_spx, vol_spx)
-        sharpe_qi = sharpe_ratio(mean_return_qi, vol_qi)
+        # Sharpe Ratio (Assuming risk-free rate is 2%)
+        sharpe_spx = sharpe_ratio(spx_returns)
+        sharpe_qi = sharpe_ratio(qi_returns)
 
-        # Sortino Ratio
-        sortino_spx = sortino_ratio(spx_returns, mean_return_spx)
-        sortino_qi = sortino_ratio(qi_returns, mean_return_qi)
+        # Sortino Ratio (Assuming risk-free rate is 2%)
+        sortino_spx = sortino_ratio(spx_returns)
+        sortino_qi = sortino_ratio(qi_returns)
 
         # Excess Return
-        ex_return = excess_return(mean_return_qi, mean_return_spx)
+        ex_return = excess_return(qi_returns, spx_returns)
 
         # Tracking Error
         track_err = tracking_error(qi_returns, spx_returns)
@@ -155,24 +259,60 @@ def main():
         info_ratio = information_ratio(ex_return, track_err)
 
         # Regression Analysis
-        alpha, beta, r_squared = regression_analysis(qi_returns, spx_returns)
+        alpha, beta, r_squared, percentage_errors, alpha_p_value = regression_analysis(qi_returns, spx_returns)
 
-        # Store Results
+        # ARMA Model Selection and Residual Analysis for Qi_Return
+        best_order_qi, best_model, arma_results_df = select_best_arma_model(qi_returns)
+        print(f"Best ARMA order for {period_name}: {best_order_qi}")
+
+        # Check residuals of the best ARMA model
+        check_residuals(best_model)
+
+        # Calculate Sharpe Ratio from ARMA model
+        arma_sharpe_ratio_qi = calculate_sharpe_from_arma_model(best_model)
+
+        # # Simulate returns from the ARMA model and calculate Sortino Ratio
+        # simulated_returns = simulate_returns(best_model)
+        # sortino_ratio_arma_qi = calculate_sortino_ratio_empirical(simulated_returns)
+
+        # ARMA Model Selection and Residual Analysis for SPX_Return
+        best_order_spx, best_model, arma_results_df = select_best_arma_model(spx_returns)
+        print(f"Best ARMA order for {period_name}: {best_order_spx}")
+
+        # Check residuals of the best ARMA model
+        check_residuals(best_model)
+
+        # Calculate Sharpe Ratio from ARMA model
+        arma_sharpe_ratio_spx = calculate_sharpe_from_arma_model(best_model)
+
+        # # Simulate returns from the ARMA model and calculate Sortino Ratio
+        # simulated_returns = simulate_returns(best_model)
+        # sortino_ratio_arma_spx = calculate_sortino_ratio_empirical(simulated_returns)
+
         results[period_name] = {
-            'Mean Annual Return SPX': mean_return_spx,
-            'Mean Annual Return Qi': mean_return_qi,
-            'Annualized Volatility SPX': vol_spx,
-            'Annualized Volatility Qi': vol_qi,
-            'Sharpe Ratio SPX': sharpe_spx,
-            'Sharpe Ratio Qi': sharpe_qi,
-            'Sortino Ratio SPX': sortino_spx,
-            'Sortino Ratio Qi': sortino_qi,
-            'Excess Return': ex_return,
-            'Tracking Error': track_err,
-            'Information Ratio': info_ratio,
-            'Alpha': alpha,
-            'Beta': beta,
-            'R-squared': r_squared
+            'Mean Annual Return SPX': round(mean_return_spx, 3),
+            'Mean Annual Return Qi': round(mean_return_qi, 3),
+            'Annualised Volatility SPX': round(vol_spx, 3),
+            'Annualised Volatility Qi': round(vol_qi, 3),
+            'Sharpe Ratio SPX': round(sharpe_spx, 3),
+            'Sharpe Ratio Qi': round(sharpe_qi, 3),
+            'Sortino Ratio SPX': round(sortino_spx, 3),
+            'Sortino Ratio Qi': round(sortino_qi, 3),
+            'Excess Return': round(ex_return, 3),
+            'Tracking Error': round(track_err, 3),
+            'Information Ratio': round(info_ratio, 3),
+            'Alpha': round(alpha, 3),
+            'Alpha percentage error': round(percentage_errors[0], 3),
+            'Beta': round(beta, 3),
+            'Beta percentage error': round(percentage_errors[1], 3),
+            'Alpha p-value': round(alpha_p_value, 3),
+            'R-squared': round(r_squared, 3),
+            'ARMA Best Order Qi': best_order_qi,
+            'ARMA Sharpe Ratio Qi': round(arma_sharpe_ratio_qi, 3),
+            # 'ARMA Sortino Ratio Qi': round(sortino_ratio_arma_qi, 3),
+            'ARMA Best Order SPX': best_order_spx,
+            'ARMA Sharpe Ratio SPX': round(arma_sharpe_ratio_spx, 3),
+            # 'ARMA Sortino Ratio SPX': round(sortino_ratio_arma_spx, 3)
         }
 
     return results
@@ -180,69 +320,80 @@ def main():
 
 # main()
 
-def perform_eda():
-    """
-    Perform Exploratory Data Analysis (EDA) and statistical tests on returns data.
-
-    Parameters:
-    - returns_df: pandas DataFrame with columns ['SPX_Return', 'Qi_Return']
-    """
+def perform_data_exploration():
+    # Read in data
     returns_df = read_in_data()
-    # 1. Visualize data with time series plots
-    plt.figure(figsize=(14, 6))
-    plt.plot(returns_df.index, returns_df['SPX_Return'], label='SPX_Return')
-    plt.plot(returns_df.index, returns_df['Qi_Return'], label='Qi_Return')
-    plt.title('Daily Returns Over Time')
+
+    # Visualise data
+    visualise_returns(returns_df)
+
+    # Test for stationarity
+    print("Testing for Stationarity:")
+    stationarity_check(returns_df)
+
+    # Test for normality using Kolmogorov-Smirnov test
+    print("\nTesting for Normality:")
+    normality_check(returns_df)
+
+    # Test for heteroskedasticity using Breusch-Pagan test
+    print("\nTesting for Heteroskedasticity:")
+    heteroskedasticity_check(returns_df)
+
+    # Validate regression assumptions
+    print("\nValidating Regression Assumptions:")
+    validate_regression_assumptions(returns_df)
+
+
+def visualise_returns(returns_df):
+    plt.figure(figsize=(12, 6))
+    for col in ['SPX_Return', 'Qi_Return']:
+        plt.plot(returns_df.index, returns_df[col], label=col, alpha=0.5)
+    plt.title('Returns Over Time')
     plt.xlabel('Date')
     plt.ylabel('Return')
     plt.legend()
     plt.show()
 
-    # 2. Identify anomalies or outliers using boxplots
-    plt.figure(figsize=(10, 4))
-    sns.boxplot(data=returns_df[['SPX_Return', 'Qi_Return']])
-    plt.title('Boxplots of Returns')
-    plt.show()
 
-    # 3. Test for stationarity using ADF test
-    print("ADF Test for SPX_Return:")
-    adf_test(returns_df['SPX_Return'])
-    print("\nADF Test for Qi_Return:")
-    adf_test(returns_df['Qi_Return'])
-
-    # 4. Assess normality
+def stationarity_check(returns_df):
     for col in ['SPX_Return', 'Qi_Return']:
-        plt.figure(figsize=(12, 5))
-        plt.subplot(1, 2, 1)
-        sns.histplot(returns_df[col], kde=True)
-        plt.title(f'Histogram of {col}')
-        plt.subplot(1, 2, 2)
-        probplot(returns_df[col].dropna(), dist="norm", plot=plt)
-        plt.title(f'Q-Q Plot of {col}')
-        plt.show()
+        result = adfuller(returns_df[col].dropna())
+        print(f"ADF Test for {col}:")
+        print(f"  ADF Statistic: {result[0]:.3f}")
+        print(f"  p-value: {result[1]:.3f}")
+        if result[1] <= 0.05:
+            print(f"  {col} is stationary.")
+        else:
+            print(f"  {col} is not stationary.")
 
-        # Conduct normality tests
-        print(f"Normality Tests for {col}:")
-        normality_tests(returns_df[col])
-        print("\n")
 
-    # 5. Check for autocorrelation and heteroskedasticity
+def normality_check(returns_df):
     for col in ['SPX_Return', 'Qi_Return']:
-        plt.figure(figsize=(12, 5))
-        plt.subplot(1, 2, 1)
-        plot_acf(returns_df[col].dropna(), ax=plt.gca(), lags=20)
-        plt.title(f'ACF of {col}')
-        plt.subplot(1, 2, 2)
-        plot_pacf(returns_df[col].dropna(), ax=plt.gca(), lags=20)
-        plt.title(f'PACF of {col}')
-        plt.show()
+        stat, p_value = kstest(returns_df[col].dropna(), 'norm')
+        print(f"KS Test for {col}:")
+        print(f"  KS Statistic: {stat:.3f}")
+        print(f"  p-value: {p_value:.3f}")
+        if p_value > 0.05:
+            print(f"  {col} looks normal (fail to reject H0).")
+        else:
+            print(f"  {col} does not look normal (reject H0).")
 
-        print(f"Heteroskedasticity Tests for {col}:")
-        heteroskedasticity_tests(returns_df[col])
-        print("\n")
 
-    # 6. Validate Regression Assumptions
-    # Regress Qi_Return on SPX_Return
+def heteroskedasticity_check(returns_df):
+    for col in ['SPX_Return', 'Qi_Return']:
+        data = pd.DataFrame({'y': returns_df[col]})
+        data['x'] = np.arange(len(returns_df))
+        model = sm.OLS(data['y'], sm.add_constant(data['x'])).fit()
+        test = het_breuschpagan(model.resid, model.model.exog)
+        print(f"Breusch-Pagan Test for {col}:")
+        print(f"  LM Statistic: {test[0]:.3f}, p-value: {test[1]:.3f}")
+        if test[1] > 0.05:
+            print(f"  No heteroskedasticity detected in {col}.")
+        else:
+            print(f"  Heteroskedasticity detected in {col}.")
+
+
+def validate_regression_assumptions(returns_df):
     data = returns_df.dropna()
     X = sm.add_constant(data['SPX_Return'])
     y = data['Qi_Return']
@@ -250,6 +401,18 @@ def perform_eda():
     print(model.summary())
 
     residuals = model.resid
+
+    # Test residuals for autocorrelation and heteroskedasticity
+    dw_stat = sm.stats.durbin_watson(residuals)
+    print(f"\nDurbin-Watson Statistic: {dw_stat:.3f}")
+    bg_test = acorr_breusch_godfrey(model, nlags=5)
+    print(f"Breusch-Godfrey Test p-value: {bg_test[3]:.3f}")
+
+    # Test residuals for normality
+    stat, p_value = kstest(residuals, 'norm')
+    print(f"KS Test for Residuals:")
+    print(f"  KS Statistic: {stat:.3f}, p-value: {p_value:.3f}")
+
     # Plot residuals
     plt.figure(figsize=(10, 6))
     plt.plot(data.index, residuals)
@@ -258,99 +421,15 @@ def perform_eda():
     plt.ylabel('Residual')
     plt.show()
 
-    # Plot histogram and Q-Q plot of residuals
-    plt.figure(figsize=(12, 5))
-    plt.subplot(1, 2, 1)
-    sns.histplot(residuals, kde=True)
-    plt.title('Histogram of Residuals')
-    plt.subplot(1, 2, 2)
-    probplot(residuals, dist="norm", plot=plt)
-    plt.title('Q-Q Plot of Residuals')
+    # Plot ACF and PACF of residuals
+    plt.figure(figsize=(12, 6))
+    plot_acf(residuals, lags=20, title='ACF of Residuals')
+    plot_pacf(residuals, lags=20, title='PACF of Residuals')
     plt.show()
 
-    # Normality test on residuals
-    print("Normality Tests for Residuals:")
-    normality_tests(residuals)
-
-    # Autocorrelation of residuals
-    plt.figure(figsize=(12, 5))
-    plt.subplot(1, 2, 1)
-    plot_acf(residuals, ax=plt.gca(), lags=20)
-    plt.title('ACF of Residuals')
-    plt.subplot(1, 2, 2)
-    plot_pacf(residuals, ax=plt.gca(), lags=20)
-    plt.title('PACF of Residuals')
-    plt.show()
-
-    # Durbin-Watson test
-    dw_stat = durbin_watson(residuals)
-    print(f'Durbin-Watson statistic: {dw_stat}')
-
-    # Breusch-Godfrey test for autocorrelation
-    bg_test = acorr_breusch_godfrey(model, nlags=5)
-    print(f'Breusch-Godfrey test p-value: {bg_test[3]}')
-
-    # Heteroskedasticity tests on residuals
-    print("Heteroskedasticity Tests on Residuals:")
-    heteroskedasticity_tests(residuals)
-
-
-# Helper functions
-def adf_test(series):
-    result = adfuller(series.dropna())
-    labels = ['ADF Statistic', 'p-value', '# Lags Used', '# Observations']
-    out = pd.Series(result[0:4], index=labels)
-    for key, value in result[4].items():
-        out[f'Critical Value ({key})'] = value
-    print(out)
-    if result[1] <= 0.05:
-        print("The series is stationary.")
-    else:
-        print("The series is non-stationary.")
-
-
-def normality_tests(series):
-    # Shapiro-Wilk Test
-    stat, p = shapiro(series)
-    print(f'Shapiro-Wilk Test: Statistics={stat:.3f}, p={p:.3f}')
-    # D'Agostino's K^2 Test
-    stat, p = normaltest(series)
-    print(f'D\'Agostino\'s K^2 Test: Statistics={stat:.3f}, p={p:.3f}')
-    # Jarque-Bera Test
-    stat, p = jarque_bera(series)
-    print(f'Jarque-Bera Test: Statistics={stat:.3f}, p={p:.3f}')
-    # Anderson-Darling Test
-    result = anderson(series)
-    print('Anderson-Darling Test:')
-    print(f'Statistic: {result.statistic:.3f}')
-    for i in range(len(result.critical_values)):
-        sl, cv = result.significance_level[i], result.critical_values[i]
-        if result.statistic < cv:
-            print(f'Significance Level {sl}%, Critical Value {cv:.3f}: Data looks normal (Fail to Reject H0)')
-        else:
-            print(f'Significance Level {sl}%, Critical Value {cv:.3f}: Data does not look normal (Reject H0)')
-
-
-def heteroskedasticity_tests(series):
-    # Create a DataFrame for the test
-    data = pd.DataFrame({'y': series})
-    data['x'] = np.arange(len(series))
-    model = ols('y ~ x', data=data).fit()
-    # Breusch-Pagan test
-    bp_test = het_breuschpagan(model.resid, model.model.exog)
-    labels = ['LM Statistic', 'LM-Test p-value', 'F-Statistic', 'F-Test p-value']
-    bp_results = dict(zip(labels, bp_test))
-    print('Breusch-Pagan Test:')
-    for key, value in bp_results.items():
-        print(f'{key}: {value}')
-    # Engle's ARCH test
-    arch_test = het_arch(series)
-    arch_results = dict(zip(labels, arch_test))
-    print('Engle\'s ARCH Test:')
-    for key, value in arch_results.items():
-        print(f'{key}: {value}')
 
 # if __name__ == "__main__":
 #     SPX_Qi_TimeSeries = pd.read_csv("baskets/SPX_Qi_TimeSeries.csv")
 #     pass
-perform_eda()
+# perform_data_exploration()
+print(main())
