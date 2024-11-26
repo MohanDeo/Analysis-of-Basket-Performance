@@ -5,12 +5,14 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import statsmodels.api as sm
+from arch import arch_model
 from scipy.stats import kstest
 from statsmodels.graphics.tsaplots import plot_acf, plot_pacf
 from statsmodels.stats.diagnostic import acorr_breusch_godfrey, het_breuschpagan
 from statsmodels.stats.diagnostic import acorr_ljungbox
+from statsmodels.tsa.api import VAR
 from statsmodels.tsa.arima.model import ARIMA
-from statsmodels.tsa.stattools import adfuller
+from statsmodels.tsa.stattools import adfuller, grangercausalitytests
 
 warnings.filterwarnings('ignore')
 
@@ -60,6 +62,18 @@ def annualised_volatility(returns):
     return returns.std() * np.sqrt(252)
 
 
+def annualised_volatility_garch(returns):
+    garch_model = arch_model(returns, vol='Garch', p=14, q=14, dist='normal')
+    fitted_model = garch_model.fit(disp="off")
+
+    daily_conditional_volatility = fitted_model.conditional_volatility
+    avg_daily_volatility = np.mean(daily_conditional_volatility)
+
+    annualised_vol = avg_daily_volatility * np.sqrt(252)
+
+    return annualised_vol
+
+
 def sharpe_ratio(returns, risk_free_rate=0.02):
     mean_return = returns.mean() * 252
     volatility = returns.std() * np.sqrt(252)
@@ -80,7 +94,6 @@ def sortino_ratio(returns, risk_free_rate=0.02):
     if downside_std < 1e-8:
         print("Downside standard deviation is effectively zero")
         return np.nan
-    print("Mean return:", mean_return, "Risk free rate:", risk_free_rate,"Downside standard deviation:", downside_std)
     return (mean_return - risk_free_rate) / downside_std
 
 
@@ -126,7 +139,6 @@ def check_residuals(model, lags=20):
 
 
 def calculate_sharpe_from_arma_model(model, risk_free_rate=0.02):
-
     mean_return = model.params.get('const', 0)
     mean_return_annualised = mean_return * 252
 
@@ -188,7 +200,7 @@ def regression_analysis(returns_qi, returns_spx, risk_free_rate=0.02, maxlags=5)
     X = data['Excess_SPX_Return']
     y = data['Excess_Qi_Return']
     X = sm.add_constant(X)
-    model = sm.OLS(y, X).fit()#(cov_type='HAC', cov_kwds={'maxlags': maxlags})
+    model = sm.OLS(y, X).fit()  # (cov_type='HAC', cov_kwds={'maxlags': maxlags})
 
     alpha_daily = model.params['const']
     alpha = (1 + alpha_daily) ** 252 - 1
@@ -209,6 +221,66 @@ def regression_analysis(returns_qi, returns_spx, risk_free_rate=0.02, maxlags=5)
     return alpha, beta, r_squared, percentage_errors, alpha_p_value
 
 
+def compute_historical_var(returns, confidence_level=0.95):
+    # Sort returns
+    sorted_returns = np.sort(returns)
+
+    # Calculate the index corresponding to the confidence level
+    index = int((1 - confidence_level) * len(sorted_returns))
+
+    # Historical VaR is the return at the index
+    var = sorted_returns[index]
+
+    # Make a graph
+    plt.figure(figsize=(10, 6))
+    plt.hist(returns, bins=100, alpha=0.7)
+    plt.axvline(var, color='r', linestyle='dashed', label=f'VaR ({confidence_level}): {var:.2%}')
+    plt.xlabel('Returns')
+    plt.ylabel('Frequency')
+    plt.title(f'VaR for Returns')
+    plt.show()
+
+    return var
+
+
+print(compute_historical_var(read_in_data()['Qi_Return']))
+
+
+def volatility_weighted_var(returns, confidence_level=0.95):
+    am = arch_model(returns, vol='Garch', p=14, q=14)
+    res = am.fit(disp='off')
+
+    conditional_vols = res.conditional_volatility
+    latest_vol = conditional_vols.iloc[-1]
+
+    # Adjust historical returns
+    vol_adjusted_returns = returns * (latest_vol / conditional_vols)
+
+    # Calculate VaR as the percentile of adjusted returns
+    var_vol_weighted = np.percentile(vol_adjusted_returns, (1 - confidence_level) * 100)
+
+    # Make a graph
+    plt.figure(figsize=(10, 6))
+    plt.hist(returns, bins=100, alpha=0.7)
+    plt.axvline(var_vol_weighted, color='r', linestyle='dashed',
+                label=f'VaR ({confidence_level}): {var_vol_weighted:.2%}')
+    plt.xlabel('Returns')
+    plt.ylabel('Frequency')
+    plt.title(f'VaR for Returns')
+    plt.show()
+
+    return var_vol_weighted
+
+
+print(volatility_weighted_var(read_in_data()['Qi_Return']))
+
+
+def compute_raroc(expected_return, var):
+    if var == 0:
+        raise ValueError("VaR cannot be zero for RAROC calculation.")
+    return expected_return / var
+
+
 def main():
     data = read_in_data()
     end_date = data.index.max()
@@ -217,15 +289,11 @@ def main():
     five_years = data.loc[end_date - pd.DateOffset(years=5):end_date]
     inception = data
 
-    # periods = {
-    #     '1 Year': one_year,
-    #     '3 Years': three_years,
-    #     '5 Years': five_years,
-    #     'Inception': inception
-    # }
-
     periods = {
-        '1 Year': one_year
+        '1 Year': one_year,
+        '3 Years': three_years,
+        '5 Years': five_years,
+        'Inception': inception
     }
 
     results = {}
@@ -240,6 +308,8 @@ def main():
         # Annualised Volatility
         vol_spx = annualised_volatility(spx_returns)
         vol_qi = annualised_volatility(qi_returns)
+        garch_vol_spx = annualised_volatility_garch(spx_returns)
+        garch_vol_qi = annualised_volatility_garch(qi_returns)
 
         # Sharpe Ratio (Assuming risk-free rate is 2%)
         sharpe_spx = sharpe_ratio(spx_returns)
@@ -294,6 +364,8 @@ def main():
             'Mean Annual Return Qi': round(mean_return_qi, 3),
             'Annualised Volatility SPX': round(vol_spx, 3),
             'Annualised Volatility Qi': round(vol_qi, 3),
+            'GARCH Volatility SPX': round(garch_vol_spx, 3),
+            'GARCH Volatility Qi': round(garch_vol_qi, 3),
             'Sharpe Ratio SPX': round(sharpe_spx, 3),
             'Sharpe Ratio Qi': round(sharpe_qi, 3),
             'Sortino Ratio SPX': round(sortino_spx, 3),
@@ -357,7 +429,7 @@ def visualise_returns(returns_df):
 
 def stationarity_check(returns_df):
     for col in ['SPX_Return', 'Qi_Return']:
-        result = adfuller(returns_df[col].dropna())
+        result = adfuller(returns_df[col])
         print(f"ADF Test for {col}:")
         print(f"  ADF Statistic: {result[0]:.3f}")
         print(f"  p-value: {result[1]:.3f}")
@@ -405,7 +477,7 @@ def validate_regression_assumptions(returns_df):
     # Test residuals for autocorrelation and heteroskedasticity
     dw_stat = sm.stats.durbin_watson(residuals)
     print(f"\nDurbin-Watson Statistic: {dw_stat:.3f}")
-    bg_test = acorr_breusch_godfrey(model, nlags=5)
+    bg_test = acorr_breusch_godfrey(model)
     print(f"Breusch-Godfrey Test p-value: {bg_test[3]:.3f}")
 
     # Test residuals for normality
@@ -432,4 +504,75 @@ def validate_regression_assumptions(returns_df):
 #     SPX_Qi_TimeSeries = pd.read_csv("baskets/SPX_Qi_TimeSeries.csv")
 #     pass
 # perform_data_exploration()
-print(main())
+# print(main())
+
+
+import scipy.stats as st
+
+
+def get_best_distribution(data):
+    dist_names = ["norm", "lognorm", "exponweib", "weibull_max", "weibull_min", "pareto", "genextreme"]
+    dist_results = []
+    params = {}
+    for dist_name in dist_names:
+        dist = getattr(st, dist_name)
+        param = dist.fit(data)
+
+        params[dist_name] = param
+        # Applying the Kolmogorov-Smirnov test
+        D, p = st.kstest(data, dist_name, args=param)
+        print("p value for " + dist_name + " = " + str(p))
+        dist_results.append((dist_name, p))
+
+    # select the best fitted distribution
+    best_dist, best_p = (max(dist_results, key=lambda item: item[1]))
+    # store the name of the best fit and its p value
+
+    print("Best fitting distribution: " + str(best_dist))
+    print("Best p value: " + str(best_p))
+    print("Parameters for the best fit: " + str(params[best_dist]))
+
+    return best_dist, best_p, params[best_dist]
+
+
+# print(get_best_distribution(read_in_data()['SPX_Return']))
+# print(get_best_distribution(read_in_data()['Qi_Return']))
+
+
+def granger_causality_test(x_data, y_data, max_lag=20):
+    results = grangercausalitytests(
+        pd.concat([x_data, y_data], axis=1), maxlag=max_lag, verbose=False)
+    # We are testing at the 5% SL
+    chisq_p_values = {lag: test_result[0]['ssr_chi2test'][1] for lag, test_result in results.items()}
+    return {lag: p for lag, p in chisq_p_values.items() if p < 0.05}
+
+
+def perform_var_impulse_response_analysis(returns_df):
+    lag_order = max(granger_causality_test(returns_df['Qi_Return'], returns_df['SPX_Return']).keys())
+    data = pd.concat([returns_df['Qi_Return'], returns_df['SPX_Return']], axis=1)
+    data.columns = ['Qi_Return', 'SPX_Return']
+    model = VAR(data)
+    results = model.fit(lag_order)
+    irf = results.irf(100)
+    # We are just examining data, without a hypothesis, so use ortho=False
+    irf.plot(orth=False)
+    return irf
+
+
+def plot_cumulative_returns(returns_df, spx_col='SPX_Return', qi_col='Qi_Return'):
+    # Calculate cumulative returns
+    cumulative_spx = (1 + returns_df[spx_col]).cumprod() - 1
+    cumulative_qi = (1 + returns_df[qi_col]).cumprod() - 1
+
+    # Plot the cumulative returns
+    plt.figure(figsize=(12, 6))
+    plt.plot(cumulative_spx, label='Cumulative SPX Returns', color='blue')
+    plt.plot(cumulative_qi, label='Cumulative QI Returns', color='orange')
+    plt.title('Cumulative Returns of SPX and QI')
+    plt.xlabel('Date')
+    plt.ylabel('Cumulative Return')
+    plt.legend()
+    plt.grid(True)
+    plt.show()
+
+plot_cumulative_returns(read_in_data())
