@@ -1,13 +1,14 @@
 import itertools
 import os
+import subprocess
 import warnings
-from random import random
-
+import random
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import statsmodels.api as sm
 from arch import arch_model
+from jinja2.optimizer import optimize
 from scipy.stats import kstest, norm
 from statsmodels.graphics.tsaplots import plot_acf, plot_pacf
 from statsmodels.stats.diagnostic import acorr_breusch_godfrey, het_arch, het_breuschpagan
@@ -19,16 +20,20 @@ from statsmodels.tsa.stattools import adfuller, grangercausalitytests
 
 warnings.filterwarnings('ignore')
 
-# Ensure the 'graphs' folder exists
-os.makedirs("graphs", exist_ok=True)
 random.seed(7809)
+os.makedirs("graphs", exist_ok=True)
+os.makedirs("further_analysis", exist_ok=True)
+
+# Set this to true if you want ARIMA-GARCH models to be picked by AIC value. Otherwise, the lag, p and q are all set to
+# 10
+optimize_aic = False
 
 
-def save_plot(filename):
+def save_plot(filename, folder="graphs"):
     """
     Save the current plot to the 'graphs' folder with the given filename.
     """
-    filepath = os.path.join("graphs", filename)
+    filepath = os.path.join(folder, filename)
     plt.savefig(filepath, bbox_inches="tight")
     plt.close()  # Close the plot to prevent it from showing inline
 
@@ -59,13 +64,36 @@ def annualised_volatility(returns):
     return returns.std() * np.sqrt(252)
 
 
-def annualised_volatility_garch(returns):
-    garch_model = arch_model(returns, vol='Garch', p=15, q=15, dist='normal')
-    fitted_model = garch_model.fit(disp="off")
+def annualised_volatility_garch(returns, max_value=10):
+    best_aic = float('inf')
+    best_p = None
+    best_q = None
+    best_model = None
 
-    daily_conditional_volatility = fitted_model.conditional_volatility
+    if optimize_aic == True:
+        # Loop over combinations of p and q
+        for p in range(max_value + 1):
+            for q in range(max_value + 1):
+                for lag in range(max_value + 1):
+                    # Otherwise an error is raised `ValueError: One of p or o must be strictly positive`
+                    if p == 0:
+                        continue
+                    if p == 0 and q == 0:
+                        continue
+                    garch_model = arch_model(returns, mean='AR', lags=lag, vol='Garch', p=p, q=q, dist='normal')
+                    fitted_model = garch_model.fit(disp="off")
+                    # Check AIC
+                    aic = fitted_model.aic
+                    if aic < best_aic:
+                        best_aic = aic
+                        best_model = fitted_model
+
+    else:
+        garch_model = arch_model(returns, mean='AR', lags=max_value, vol='Garch', p=max_value, q=max_value, dist='normal')
+        best_model = garch_model.fit(disp="off")
+
+    daily_conditional_volatility = best_model.conditional_volatility
     avg_daily_volatility = np.mean(daily_conditional_volatility)
-
     annualised_vol = avg_daily_volatility * np.sqrt(252)
 
     return annualised_vol
@@ -188,7 +216,7 @@ def regression_analysis(returns_qi, returns_spx, risk_free_rate=0.02):
     y = data['Excess_Qi_Return']
     X = sm.add_constant(X)
 
-    max_lags = len(returns_qi) ** 0.25
+    max_lags = int(len(returns_qi) ** 0.25)
     model = sm.OLS(y, X).fit(cov_type='HAC', cov_kwds={'maxlags': max_lags})
 
     alpha_daily = model.params['const']
@@ -217,63 +245,7 @@ def regression_analysis(returns_qi, returns_spx, risk_free_rate=0.02):
     return alpha, beta, r_squared, percentage_errors, alpha_p_value, bp_p_value, dw_stat
 
 
-def compute_historical_var(returns, confidence_level=0.95):
-    # Sort returns
-    sorted_returns = np.sort(returns)
-
-    # Calculate the index corresponding to the confidence level
-    index = int((1 - confidence_level) * len(sorted_returns))
-
-    # Historical VaR is the return at the index
-    var = sorted_returns[index]
-
-    # Make a graph
-    plt.figure(figsize=(10, 6))
-    plt.hist(returns, bins=100, alpha=0.7)
-    plt.axvline(var, color='r', linestyle='dashed', label=f'VaR ({confidence_level}): {var:.2%}')
-    plt.xlabel('Returns')
-    plt.ylabel('Frequency')
-    plt.title(f'Historical VaR for Returns')
-    plt.legend()
-    save_plot("historical_var.png")
-
-    return var
-
-
-def volatility_weighted_var(returns, confidence_level=0.95):
-    am = arch_model(returns, vol='Garch', p=14, q=14)
-    res = am.fit(disp='off')
-
-    conditional_vols = res.conditional_volatility
-    latest_vol = conditional_vols.iloc[-1]
-
-    # Adjust historical returns
-    vol_adjusted_returns = returns * (latest_vol / conditional_vols)
-
-    # Calculate VaR as the percentile of adjusted returns
-    var_vol_weighted = np.percentile(vol_adjusted_returns, (1 - confidence_level) * 100)
-
-    # Make a graph
-    plt.figure(figsize=(10, 6))
-    plt.hist(returns, bins=100, alpha=0.7)
-    plt.axvline(var_vol_weighted, color='r', linestyle='dashed',
-                label=f'VaR ({confidence_level}): {var_vol_weighted:.2%}')
-    plt.xlabel('Returns')
-    plt.ylabel('Frequency')
-    plt.title(f'Volatility Weighted VaR for Returns')
-    plt.legend()
-    save_plot("volatility_weighted_var.png")
-
-    return var_vol_weighted
-
-
-def compute_raroc(expected_return, var):
-    if var == 0:
-        raise ValueError("VaR cannot be zero for RAROC calculation.")
-    return expected_return / var
-
-
-def main():
+def main_analysis():
     data = read_in_data()
     end_date = data.index.max()
     one_year = data.loc[end_date - pd.DateOffset(years=1):end_date]
@@ -347,13 +319,13 @@ def main():
         results[period_name] = {
             'Mean Annual Return SPX': round(mean_return_spx, 3),
             'Mean Annual Return Qi': round(mean_return_qi, 3),
-            'Annualised Volatility SPX': round(vol_spx, 3),
-            'Annualised Volatility Qi': round(vol_qi, 3),
-            'GARCH Volatility SPX': round(garch_vol_spx, 3),
-            'GARCH Volatility Qi': round(garch_vol_qi, 3),
+            'Volatility Annualised SPX': round(vol_spx, 3),
+            'Volatility Annualised Qi': round(vol_qi, 3),
+            'Volatility Annualised ARMA-GARCH SPX': round(garch_vol_spx, 3),
+            'Volatility Annualised ARMA-GARCH Qi': round(garch_vol_qi, 3),
             'Sharpe Ratio SPX': round(sharpe_spx, 3),
             'Sharpe Ratio Qi': round(sharpe_qi, 3),
-            'Qi Probabilistic Sharpe Ratio': round(qi_probabilistic_sharpe, 3),
+            'Sharpe Ratio Qi Probabilistic': round(qi_probabilistic_sharpe, 3),
             'Sortino Ratio SPX': round(sortino_spx, 3),
             'Sortino Ratio Qi': round(sortino_qi, 3),
             'Excess Return': round(ex_return, 3),
@@ -364,15 +336,13 @@ def main():
             'Beta': round(beta, 3),
             'Beta percentage error': round(percentage_errors[1], 3),
             'Alpha p-value': round(alpha_p_value, 3),
-            'R-squared': round(r_squared, 3),
-            'BP p-value': round(bp_p_value, 3),
-            'DW Statistic': round(dw_stat, 3),
-            'ARMA Best Order SPX': best_order_spx,
-            'ARMA Sharpe Ratio SPX': round(arma_sharpe_ratio_spx, 3),
-            'ARMA Residuals p-value SPX': round(p_value_spx, 3),
-            'ARMA Best Order Qi': best_order_qi,
-            'ARMA Sharpe Ratio Qi': round(arma_sharpe_ratio_qi, 3),
-            'ARMA Residuals p-value Qi': round(p_value_qi, 3),
+            'Alpha-Beta R-squared': round(r_squared, 3),
+            'Alpha-Beta BP p-value': round(bp_p_value, 3),
+            'Alpha-Beta DW Statistic': round(dw_stat, 3),
+            'Sharpe Ratio ARMA SPX': round(arma_sharpe_ratio_spx, 3),
+            'Sharpe Ratio ARMA Residuals p-value SPX': round(p_value_spx, 3),
+            'Sharpe Ratio ARMA Qi': round(arma_sharpe_ratio_qi, 3),
+            'Sharpe Ratio ARMA Residuals p-value Qi': round(p_value_qi, 3),
         }
 
     # Save results to a CSV file
@@ -382,14 +352,24 @@ def main():
 
     return results_df
 
+def visualise_raw_data(returns_df):
+    plt.figure(figsize=(12, 6))
+    for col in ['SPX', 'Qi']:
+        plt.plot(returns_df.index, returns_df[col], label=col, alpha=0.5)
+    plt.title('Returns Over Time')
+    plt.xlabel('Date')
+    plt.ylabel('Return')
+    plt.legend()
+    save_plot("raw_returns_over_time.png")
+
 
 def visualise_returns(returns_df):
     plt.figure(figsize=(12, 6))
     for col in ['SPX_Return', 'Qi_Return']:
         plt.plot(returns_df.index, returns_df[col], label=col, alpha=0.5)
-    plt.title('Returns Over Time')
+    plt.title('Percentage Over Time')
     plt.xlabel('Date')
-    plt.ylabel('Return')
+    plt.ylabel('Return (%)')
     plt.legend()
     save_plot("returns_over_time.png")
 
@@ -544,6 +524,7 @@ def perform_data_exploration():
     returns_df = read_in_data()
 
     # Visualise data
+    visualise_raw_data(returns_df)
     visualise_returns(returns_df)
 
     # Create ACF/PACF plots
@@ -557,11 +538,6 @@ def perform_data_exploration():
 
     # Test for heteroskedasticity using Breusch-Pagan test
     heteroskedasticity_results = heteroskedasticity_check(returns_df)
-
-    arch_test = het_arch(returns_df['SPX_Return'], nlags=20)
-    print(f'ARCH Test p-value: {arch_test[1]} {arch_test[3]}')
-    arch_test = het_arch(returns_df['Qi_Return'], nlags=20)
-    print(f'ARCH Test p-value: {arch_test[1]} {arch_test[3]}')
 
     # Validate regression assumptions
     regression_results = validate_regression_assumptions(returns_df)
@@ -589,15 +565,49 @@ def perform_data_exploration():
     print("Exploratory data analysis results saved to CSV files.")
 
 
-def granger_causality_test(x_data, y_data, max_lag=20):
+def granger_causality_test(x_data, y_data, max_lag=20, output_folder="further_analysis"):
     results = grangercausalitytests(
-        pd.concat([x_data, y_data], axis=1), maxlag=max_lag, verbose=False)
-    # We are testing at the 5% SL
-    chisq_p_values = {lag: test_result[0]['ssr_chi2test'][1] for lag, test_result in results.items()}
-    return {lag: p for lag, p in chisq_p_values.items() if p < 0.05}
+        pd.concat([x_data, y_data], axis=1), maxlag=max_lag, verbose=False
+    )
+
+    chisq_p_values = {
+        lag: test_result[0]['ssr_chi2test'][1] for lag, test_result in results.items()
+    }
+
+    # Get significant results (p < 0.05) before rounding
+    significant_results = {lag: p for lag, p in chisq_p_values.items() if p < 0.05}
+
+    rounded_significant_p_values = {lag: round(p, 3) for lag, p in significant_results.items()}
+
+    # Save significant results to CSV
+    significant_df = pd.DataFrame(
+        list(rounded_significant_p_values.items()), columns=["Lag", "p-value"]
+    )
+    significant_df.sort_values('Lag', inplace=True)
+    output_path_sig = os.path.join(output_folder, "granger_causality_significant_results.csv")
+    significant_df.to_csv(output_path_sig, index=False)
+
+    # Plot all p-values
+    p_values_df = pd.DataFrame(list(chisq_p_values.items()), columns=["Lag", "p-value"])
+    p_values_df.sort_values('Lag', inplace=True)
+
+    plt.figure(figsize=(10, 6))
+    plt.plot(p_values_df['Lag'], p_values_df['p-value'], marker='o')
+    plt.axhline(y=0.05, color='red', linestyle='--', label='Significance Level (0.05)')
+    plt.title('Granger Causality Test P-Values')
+    plt.xlabel('Lag')
+    plt.ylabel('P-Value')
+    plt.xticks(range(1, max_lag + 1))
+    plt.legend()
+    plt.grid(True)
+    plot_path = os.path.join(output_folder, "granger_causality_p_values.png")
+    plt.savefig(plot_path, bbox_inches='tight')
+    plt.close()
+
+    return significant_results
 
 
-def perform_var_impulse_response_analysis(returns_df):
+def perform_var_impulse_response_analysis(returns_df, output_folder="further_analysis"):
     significant_lags = granger_causality_test(returns_df['Qi_Return'], returns_df['SPX_Return'])
     if significant_lags:
         lag_order = max(significant_lags.keys())
@@ -609,12 +619,12 @@ def perform_var_impulse_response_analysis(returns_df):
     results = model.fit(lag_order)
     irf = results.irf(10)
     # We are just examining data, without a hypothesis, so use ortho=False
-    fig = irf.plot(orth=False)
-    save_plot("var_impulse_response.png")
+    irf.plot(orth=False)
+    save_plot("var_impulse_response.png", output_folder)
     return irf
 
 
-def plot_cumulative_returns(returns_df, spx_col='SPX_Return', qi_col='Qi_Return'):
+def plot_cumulative_returns(returns_df, spx_col='SPX_Return', qi_col='Qi_Return', output_folder="further_analysis"):
     # Calculate cumulative returns
     cumulative_spx = (1 + returns_df[spx_col]).cumprod() - 1
     cumulative_qi = (1 + returns_df[qi_col]).cumprod() - 1
@@ -623,23 +633,104 @@ def plot_cumulative_returns(returns_df, spx_col='SPX_Return', qi_col='Qi_Return'
     plt.figure(figsize=(12, 6))
     plt.plot(cumulative_spx, label='Cumulative SPX Returns', color='blue')
     plt.plot(cumulative_qi, label='Cumulative QI Returns', color='orange')
-    plt.title('Cumulative Returns of SPX and QI')
+    plt.title('Cumulative Product of Returns of SPX and QI')
     plt.xlabel('Date')
     plt.ylabel('Cumulative Return')
     plt.legend()
     plt.grid(True)
-    save_plot("cumulative_returns.png")
+    save_plot("cumulative_returns.png", output_folder)
 
 
-# def main_exploration():
-#     perform_data_exploration()
-#     returns_df = read_in_data()
-#     plot_cumulative_returns(returns_df)
-#     perform_var_impulse_response_analysis(returns_df)
-#     compute_historical_var(returns_df['Qi_Return'])
-#     volatility_weighted_var(returns_df['Qi_Return'])
+def volatility_weighted_var(returns, confidence_level=0.95, max_value=10, output_folder="further_analysis"):
+    best_aic = float('inf')
+    best_p = None
+    best_q = None
+    best_model = None
 
+    if optimize_aic == True:
+        # Loop over combinations of p and q
+        for p in range(max_value + 1):
+            for q in range(max_value + 1):
+                for lag in range(max_value + 1):
+                    # Otherwise an error is raised `ValueError: One of p or o must be strictly positive`
+                    if p == 0:
+                        continue
+                    if p == 0 and q == 0:
+                        continue
+                    garch_model = arch_model(returns, mean='AR', lags=lag, vol='Garch', p=p, q=q, dist='normal')
+                    fitted_model = garch_model.fit(disp="off")
+                    # Check AIC
+                    aic = fitted_model.aic
+                    if aic < best_aic:
+                        best_aic = aic
+                        best_model = fitted_model
+    else:
+        garch_model = arch_model(returns, mean='AR', lags=max_value, vol='Garch', p=max_value, q=max_value, dist='normal')
+        best_model = garch_model.fit(disp="off")
+
+    conditional_vols = best_model.conditional_volatility
+    latest_vol = conditional_vols.iloc[-1]
+
+    # Adjust historical returns
+    vol_adjusted_returns = returns * (latest_vol / conditional_vols)
+
+    # Calculate VaR as the percentile of adjusted returns
+    var_vol_weighted = np.percentile(vol_adjusted_returns, (1 - confidence_level) * 100)
+
+    # Make a graph
+    plt.figure(figsize=(10, 6))
+    plt.hist(returns, bins=100, alpha=0.7)
+    plt.axvline(var_vol_weighted, color='r', linestyle='dashed',
+                label=f'VaR ({confidence_level}): {var_vol_weighted:.2%}')
+    plt.xlabel('Returns')
+    plt.ylabel('Frequency')
+    plt.title(f'Volatility Weighted VaR for Returns')
+    plt.legend()
+    save_plot("volatility_weighted_var.png", output_folder)
+
+    return var_vol_weighted
+
+
+def further_analysis():
+    # Read in returns data
+    returns_df = read_in_data()
+
+    # Create cumulative returns plot
+    plot_cumulative_returns(returns_df)
+
+    # Perform VAR impulse response analysis
+    perform_var_impulse_response_analysis(returns_df)
+
+    # Compute Value at Risk (VaR) for SPX and Qi
+    value_at_risk_spx = volatility_weighted_var(returns_df['SPX_Return'])
+    value_at_risk_qi = volatility_weighted_var(returns_df['Qi_Return'])
+
+    results = {
+        'Metric': ['VaR (SPX)', 'VaR (Qi)'],
+        'Value': [round(value_at_risk_spx, 3), round(value_at_risk_qi, 3)]
+    }
+    results_df = pd.DataFrame(results)
+
+    output_folder = "further_analysis"
+
+    output_path = os.path.join(output_folder, "var_results.csv")
+    results_df.to_csv(output_path, index=False)
+
+def install_requirements():
+    try:
+        # Run the pip install command with the requirements.txt file
+        subprocess.check_call(["pip", "install", "-r", "requirements.txt"])
+        print("All requirements installed successfully!")
+    except subprocess.CalledProcessError as e:
+        print(f"An error occurred while installing packages: {e}")
+    except FileNotFoundError:
+        print("Ensure that pip is installed and added to your PATH environment.")
+
+# Call the function
+install_requirements()
 
 if __name__ == "__main__":
+    install_requirements()
     perform_data_exploration()
-    # main()
+    main_analysis()
+    further_analysis()
