@@ -1,14 +1,14 @@
 import itertools
 import os
+import random
 import subprocess
 import warnings
-import random
+
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import statsmodels.api as sm
 from arch import arch_model
-from jinja2.optimizer import optimize
 from scipy.stats import kstest, norm
 from statsmodels.graphics.tsaplots import plot_acf, plot_pacf
 from statsmodels.stats.diagnostic import acorr_breusch_godfrey, het_arch, het_breuschpagan
@@ -26,13 +26,10 @@ os.makedirs("further_analysis", exist_ok=True)
 
 # Set this to true if you want ARIMA-GARCH models to be picked by AIC value. Otherwise, the lag, p and q are all set to
 # 10
-optimize_aic = False
+optimize_aic = True
 
 
 def save_plot(filename, folder="graphs"):
-    """
-    Save the current plot to the 'graphs' folder with the given filename.
-    """
     filepath = os.path.join(folder, filename)
     plt.savefig(filepath, bbox_inches="tight")
     plt.close()  # Close the plot to prevent it from showing inline
@@ -66,8 +63,6 @@ def annualised_volatility(returns):
 
 def annualised_volatility_garch(returns, max_value=10):
     best_aic = float('inf')
-    best_p = None
-    best_q = None
     best_model = None
 
     if optimize_aic == True:
@@ -89,7 +84,10 @@ def annualised_volatility_garch(returns, max_value=10):
                         best_model = fitted_model
 
     else:
-        garch_model = arch_model(returns, mean='AR', lags=max_value, vol='Garch', p=max_value, q=max_value, dist='normal')
+        # The value for lag is informed by the rule of thumb T^1/4
+        # The values for p and q are informed by the ACDF plot
+        garch_model = arch_model(returns, mean='AR', lags=int(len(returns) ** 0.25), vol='Garch', p=14, q=14,
+                                 dist='normal')
         best_model = garch_model.fit(disp="off")
 
     daily_conditional_volatility = best_model.conditional_volatility
@@ -351,6 +349,7 @@ def main_analysis():
     print("Main analysis results saved to 'graphs/main_results.csv'.")
 
     return results_df
+
 
 def visualise_raw_data(returns_df):
     plt.figure(figsize=(12, 6))
@@ -643,8 +642,6 @@ def plot_cumulative_returns(returns_df, spx_col='SPX_Return', qi_col='Qi_Return'
 
 def volatility_weighted_var(returns, confidence_level=0.95, max_value=10, output_folder="further_analysis"):
     best_aic = float('inf')
-    best_p = None
-    best_q = None
     best_model = None
 
     if optimize_aic == True:
@@ -665,7 +662,10 @@ def volatility_weighted_var(returns, confidence_level=0.95, max_value=10, output
                         best_aic = aic
                         best_model = fitted_model
     else:
-        garch_model = arch_model(returns, mean='AR', lags=max_value, vol='Garch', p=max_value, q=max_value, dist='normal')
+        # The value for lag is informed by the rule of thumb T^1/4
+        # The values for p and q are informed by the ACDF plot
+        garch_model = arch_model(returns, mean='AR', lags=int(len(returns) ** 0.25), vol='Garch', p=14, q=14,
+                                 dist='normal')
         best_model = garch_model.fit(disp="off")
 
     conditional_vols = best_model.conditional_volatility
@@ -716,6 +716,7 @@ def further_analysis():
     output_path = os.path.join(output_folder, "var_results.csv")
     results_df.to_csv(output_path, index=False)
 
+
 def install_requirements():
     try:
         # Run the pip install command with the requirements.txt file
@@ -726,8 +727,6 @@ def install_requirements():
     except FileNotFoundError:
         print("Ensure that pip is installed and added to your PATH environment.")
 
-# Call the function
-install_requirements()
 
 if __name__ == "__main__":
     install_requirements()
