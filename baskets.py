@@ -377,7 +377,7 @@ def visualise_returns(returns_df):
     for col in ['SPX_Return', 'Qi_Return']:
         plt.plot(returns_df.index, returns_df[col], label=label_map[col], alpha=0.5)
 
-    plt.title('Percentage Over Time')
+    plt.title('Returns Over Time')
     plt.xlabel('Date')
     plt.ylabel('Return')
     plt.legend()
