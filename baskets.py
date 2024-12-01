@@ -33,12 +33,31 @@ optimise_aic = False
 
 
 def save_plot(filename, folder="exploratory_analysis"):
+    """
+    Saves a matplotlib plot to file, closing the plot afterwards to prevent it from showing inline.
+
+    Parameters
+    ----------
+    filename : str
+        The filename to save the plot to.
+    folder : str, optional
+        The folder to save the plot in. Defaults to 'exploratory_analysis'.
+    """
     filepath = os.path.join(folder, filename)
     plt.savefig(filepath, bbox_inches="tight")
-    plt.close()  # Close the plot to prevent it from showing inline
+    plt.close()
 
 
 def read_in_data():
+    """
+        Reads in the CSV file 'SPX_Qi_TimeSeries.csv', which contains the time series of the SPX and Qi indices.
+        The file is expected to contain columns 'Date', 'SPX' and 'Qi'.
+        The 'Date' column is converted to a datetime and set as the index of the dataframe.
+        The returns of the SPX and Qi are calculated as the percentage change of the respective columns.
+        The first row of the dataframe is dropped as it becomes NaN when calculating the returns.
+        The dataframe is then sorted by index to ensure that the data is in the correct order.
+        The sorted dataframe is then returned.
+        """
     data = pd.read_csv(
         'SPX_Qi_TimeSeries.csv',
         parse_dates=['Date'],
@@ -55,16 +74,75 @@ def read_in_data():
 
 
 def mean_annual_return(returns):
+    """
+    Calculates the mean annual return from a series of daily returns.
+
+    Parameters
+    ----------
+    returns : pd.Series
+        A series of daily returns.
+
+    Returns
+    -------
+    float
+        The mean annual return.
+
+    Notes
+    -----
+    The mean annual return is calculated as follows:
+    1. The cumulative return is calculated by taking the product of all the daily returns.
+    2. The mean annual return is then calculated by taking the cumulative return to the power of 252 divided by the 
+    number of days, and subtracting one.
+    """
     cumulative_return = (1 + returns).prod()
     annual_return = cumulative_return ** (252 / len(returns)) - 1
     return annual_return
 
 
 def annualised_volatility(returns):
+    """
+    Calculates the annualised volatility of a series of daily returns.
+
+    Parameters
+    ----------
+    returns : pd.Series
+        A series of daily returns.
+
+    Returns
+    -------
+    float
+        The annualised volatility.
+
+    Notes
+    -----
+    The annualised volatility is calculated by multiplying the standard deviation of the daily returns by the
+    square root of 252.
+    """
     return returns.std() * np.sqrt(252)
 
 
 def annualised_volatility_garch(returns, max_value=10):
+    """
+    Calculates the annualised volatility using an ARMA-GARCH model.
+
+    Parameters
+    ----------
+    returns : pd.Series
+        A series of daily returns.
+    max_value : int, optional
+        The maximum number of autoregressive and moving average terms to consider, by default 10.
+
+    Returns
+    -------
+    float
+        The annualised volatility.
+
+    Notes
+    -----
+    The annualised volatility is calculated by fitting an ARMA-GARCH model to the data and then calculating the mean
+    of the daily conditional volatility. The mean is then multiplied by the square root of 252 to give the annualised
+    volatility.
+    """
     best_aic = float('inf')
     best_model = None
 
@@ -101,6 +179,21 @@ def annualised_volatility_garch(returns, max_value=10):
 
 
 def sharpe_ratio(returns, risk_free_rate=0.02):
+    """
+    Calculate the Sharpe ratio of a given set of returns.
+
+    Parameters
+    ----------
+    returns : pd.Series
+        Returns of the asset or strategy.
+    risk_free_rate : float, optional
+        The risk-free rate. Defaults to 0.02 (2%).
+
+    Returns
+    -------
+    sharpe_ratio : float or NaN
+        The Sharpe ratio of the given returns. If the volatility is zero, returns NaN.
+    """
     mean_return = returns.mean() * 252
     volatility = returns.std() * np.sqrt(252)
     # We need to deal with the case where the volatility is effectively zero
@@ -110,6 +203,21 @@ def sharpe_ratio(returns, risk_free_rate=0.02):
 
 
 def sortino_ratio(returns, risk_free_rate=0.02):
+    """
+    Calculate the Sortino ratio of a given set of returns.
+
+    Parameters
+    ----------
+    returns : pd.Series
+        Returns of the asset or strategy.
+    risk_free_rate : float, optional
+        The risk-free rate. Defaults to 0.02 (2%).
+
+    Returns
+    -------
+    sortino_ratio : float or NaN
+        The Sortino ratio of the given returns. If the downside standard deviation is zero, returns NaN.
+    """
     mean_return = returns.mean() * 252
     negative_returns = returns[returns < 0]
     if len(negative_returns) == 0:
@@ -122,6 +230,35 @@ def sortino_ratio(returns, risk_free_rate=0.02):
 
 
 def select_best_arma_model(time_series, max_p=5, max_q=5, criterion='aic'):
+    """
+        Selects the best ARMA model for a given time series based on the specified information criterion.
+
+        Parameters
+        ----------
+        time_series : array-like
+            The time series data for which the ARMA model is to be selected.
+        max_p : int, optional
+            The maximum order of the autoregressive part, by default 5.
+        max_q : int, optional
+            The maximum order of the moving average part, by default 5.
+        criterion : str, optional
+            The criterion to be used for model selection ('aic' or 'bic'), by default 'aic'.
+
+        Returns
+        -------
+        tuple
+            A tuple containing:
+            - best_order : tuple
+                The order (p, q) of the best ARMA model based on the specified criterion.
+            - best_model : ARIMA
+                The fitted ARIMA model with the best order.
+            - results_df : pd.DataFrame
+                A DataFrame containing the orders and corresponding AIC and BIC scores for all models considered.
+
+        Notes
+        -----
+        The function assumes the input time series is stationary.
+        """
     p = range(0, max_p + 1)
     q = range(0, max_q + 1)
     pq = list(itertools.product(p, q))
@@ -152,6 +289,22 @@ def select_best_arma_model(time_series, max_p=5, max_q=5, criterion='aic'):
 
 
 def check_residuals(model, lags=20):
+    """
+        Perform a Ljung-Box test on the residuals of a given model to check for autocorrelation.
+
+        Parameters
+        ----------
+        model : statsmodels model
+            The fitted model whose residuals are to be tested.
+        lags : int, optional
+            The number of lags to include in the test, by default 20.
+
+        Returns
+        -------
+        float
+            The p-value of the Ljung-Box test. A small p-value suggests that there is significant
+            autocorrelation in the residuals.
+        """
     residuals = model.resid
     lb_test = acorr_ljungbox(residuals, lags=[lags], return_df=True)
     p_value = lb_test['lb_pvalue'].values[0]
@@ -159,6 +312,26 @@ def check_residuals(model, lags=20):
 
 
 def calculate_sharpe_from_arma_model(model, risk_free_rate=0.02):
+    """
+    Calculate the Sharpe Ratio of a given ARMA model.
+
+    Parameters
+    ----------
+    model : statsmodels ARMA model
+        The fitted model for which to calculate the Sharpe Ratio.
+    risk_free_rate : float, optional
+        The risk-free rate, by default 0.02.
+
+    Returns
+    -------
+    float
+        The calculated Sharpe Ratio.
+
+    Notes
+    -----
+    The Sharpe Ratio is a measure of risk-adjusted return, calculated as the excess return
+    over the risk-free rate divided by the volatility of the returns.
+    """
     mean_return = model.params.get('const', 0)
     mean_return_annualised = mean_return * 252
 
@@ -174,8 +347,31 @@ def calculate_sharpe_from_arma_model(model, risk_free_rate=0.02):
     return sharpe_ratio
 
 
-# Calculate Standard Deviation of Sharpe Ratio (Std Dev SR)
 def standard_deviation_sharpe_ratio(calculated_sharpe_ratio, num_obs, skewness, kurtosis):
+    """
+    Calculate the standard deviation of a calculated Sharpe Ratio.
+
+    Parameters
+    ----------
+    calculated_sharpe_ratio : float
+        The calculated Sharpe Ratio.
+    num_obs : int
+        The number of observations used to calculate the Sharpe Ratio.
+    skewness : float
+        The sample skewness of the returns.
+    kurtosis : float
+        The sample kurtosis of the returns.
+
+    Returns
+    -------
+    float
+        The standard deviation of the Sharpe Ratio.
+
+    Notes
+    -----
+    The formula used is based on the approach described in
+    "The Statistics of Sharpe Ratios" by Andrew W. Lo (2002).
+    """
     return np.sqrt(
         (1 - skewness * calculated_sharpe_ratio +
          (kurtosis - 1) / 4 * calculated_sharpe_ratio ** 2
@@ -184,6 +380,32 @@ def standard_deviation_sharpe_ratio(calculated_sharpe_ratio, num_obs, skewness, 
 
 
 def probabilistic_sharpe_ratio(calculated_sharpe_ratio, bench_sharpe_ratio, num_obs, skewness, kurtosis):
+    """
+        Calculate the Probabilistic Sharpe Ratio (PSR).
+
+        The PSR is the probability that a Sharpe ratio is greater than a benchmark Sharpe ratio,
+        accounting for the sample size, skewness, and kurtosis of the returns. It provides a measure
+        of the likelihood that the observed Sharpe ratio reflects the true Sharpe ratio.
+
+        Parameters
+        ----------
+        calculated_sharpe_ratio : float
+            The Sharpe ratio calculated for the returns.
+        bench_sharpe_ratio : float
+            The benchmark Sharpe ratio to compare against.
+        num_obs : int
+            The number of observations in the sample.
+        skewness : float
+            The skewness of the returns distribution.
+        kurtosis : float
+            The kurtosis of the returns distribution.
+
+        Returns
+        -------
+        float
+            The Probabilistic Sharpe Ratio, representing the probability that the calculated
+            Sharpe ratio is greater than the benchmark Sharpe ratio.
+        """
     sr_diff = calculated_sharpe_ratio - bench_sharpe_ratio
     sr_vol = standard_deviation_sharpe_ratio(calculated_sharpe_ratio, num_obs, skewness, kurtosis)
     psr = norm.cdf(sr_diff / sr_vol)
@@ -192,21 +414,100 @@ def probabilistic_sharpe_ratio(calculated_sharpe_ratio, bench_sharpe_ratio, num_
 
 
 def excess_return(returns_qi, returns_spx):
+    """
+    Calculate the excess return of Qi portfolio over SPX.
+
+    Parameters
+    ----------
+    returns_qi : pd.Series
+        The daily returns of the Qi portfolio.
+    returns_spx : pd.Series
+        The daily returns of the SPX index.
+
+    Returns
+    -------
+    float
+        The excess return of the Qi portfolio over the SPX index.
+    """
     mean_return_qi = returns_qi.mean() * 252
     mean_return_spx = returns_spx.mean() * 252
     return mean_return_qi - mean_return_spx
 
 
 def tracking_error(returns_qi, returns_spx):
+    """
+    Calculate the tracking error of the Qi portfolio relative to the SPX index.
+
+    The tracking error measures the standard deviation of the difference
+    between the returns of the Qi portfolio and the SPX index, annualized
+    by multiplying by the square root of 252.
+
+    Parameters
+    ----------
+    returns_qi : pd.Series
+        The daily returns of the Qi portfolio.
+    returns_spx : pd.Series
+        The daily returns of the SPX index.
+
+    Returns
+    -------
+    float
+        The annualized tracking error of the Qi portfolio relative to the SPX index.
+    """
     difference = returns_qi - returns_spx
     return difference.std() * np.sqrt(252)
 
 
 def information_ratio(calculated_excess_return, calculated_tracking_err):
+    """
+        Calculate the Information Ratio.
+
+        The Information Ratio measures the excess return of an asset or portfolio
+        relative to a benchmark, adjusted for the tracking error. It is a useful
+        metric for assessing the risk-adjusted performance of an investment strategy
+        compared to the benchmark.
+
+        Parameters
+        ----------
+        calculated_excess_return : float
+            The calculated excess return of the asset or portfolio over the benchmark.
+        calculated_tracking_err : float
+            The calculated tracking error, which is the standard deviation of the
+            excess returns.
+
+        Returns
+        -------
+        float
+            The Information Ratio, representing the risk-adjusted excess return.
+        """
     return calculated_excess_return / calculated_tracking_err
 
 
 def regression_analysis(returns_qi, returns_spx, risk_free_rate=0.02):
+    """
+    Perform regression analysis of Qi returns against SPX returns.
+
+    This function calculates the linear regression between the excess returns
+    of Qi and SPX, adjusting for a daily risk-free rate. It computes the alpha,
+    beta, R-squared, percentage errors of the coefficients, the p-value of alpha,
+    and tests for autocorrelation and heteroskedasticity using the Durbin-Watson
+    and Breusch-Pagan tests.
+
+    Parameters:
+    returns_qi (pd.Series): Daily returns of the Qi portfolio.
+    returns_spx (pd.Series): Daily returns of the SPX index.
+    risk_free_rate (float, optional): Annual risk-free rate. Default is 0.02.
+
+    Returns:
+    tuple: A tuple containing:
+        - alpha (float): Annualized alpha of the regression.
+        - beta (float): Beta of the regression.
+        - r_squared (float): R-squared value of the regression.
+        - percentage_errors (list of float): Percentage errors of the coefficients.
+        - alpha_p_value (float): p-value of the alpha coefficient.
+        - bp_p_value (float): p-value from the Breusch-Pagan test.
+        - dw_stat (float): Durbin-Watson statistic.
+    """
     risk_free_rate_daily = risk_free_rate / 252
     data = pd.concat([returns_qi, returns_spx], axis=1)
     # Calculate excess returns
@@ -247,6 +548,24 @@ def regression_analysis(returns_qi, returns_spx, risk_free_rate=0.02):
 
 
 def main_analysis():
+    """
+    Perform financial analysis on Qi and SPX returns over different time periods.
+
+    This function reads in return data, divides it into different time periods,
+    and calculates various financial metrics for each period. The calculated
+    metrics include mean annual return, annualised volatility, Sharpe ratio,
+    Sortino ratio, excess return, tracking error, and information ratio.
+    Additionally, regression analysis and ARMA model analysis are performed
+    to derive further insights.
+
+    The results of the analysis are saved to a CSV file for further review.
+
+    Returns:
+    --------
+    pd.DataFrame
+        A DataFrame containing the calculated metrics and analysis results
+        for each time period.
+    """
     data = read_in_data()
     end_date = data.index.max()
     one_year = data.loc[end_date - pd.DateOffset(years=1):end_date]
@@ -355,17 +674,51 @@ def main_analysis():
 
 
 def visualise_raw_data(returns_df):
+    """
+    Visualise the raw index data over time.
+
+    This function takes a DataFrame of daily returns and plots the raw index data
+    over time. The result is a line plot showing the value of both the SPX and Qi
+    indices over time.
+
+    Parameters
+    ----------
+    returns_df : pd.DataFrame
+        A DataFrame containing the daily returns of the SPX and Qi indices. The
+        DataFrame should have columns 'SPX_Return' and 'Qi_Return'.
+
+    Returns
+    -------
+    None
+    """
     plt.figure(figsize=(12, 6))
     for col in ['SPX', 'Qi']:
         plt.plot(returns_df.index, returns_df[col], label=col, alpha=0.5)
-    plt.title('Indices Over Time')
+    plt.title('Index Over Time')
     plt.xlabel('Date')
     plt.ylabel('Index value')
     plt.legend()
-    save_plot("raw_returns_over_time.png")
+    save_plot("index_over_time.png")
 
 
 def visualise_returns(returns_df):
+    """
+    Visualise the returns of the SPX and Qi indices over time.
+
+    This function takes a DataFrame of daily returns and plots the returns of the
+    SPX and Qi indices over time. The result is a line plot showing the returns of
+    both the SPX and Qi indices over time.
+
+    Parameters
+    ----------
+    returns_df : pd.DataFrame
+        A DataFrame containing the daily returns of the SPX and Qi indices. The
+        DataFrame should have columns 'SPX_Return' and 'Qi_Return'.
+
+    Returns
+    -------
+    None
+    """
     plt.figure(figsize=(12, 6))
 
     # Make a label map, so legend appears as we want it to
@@ -385,6 +738,24 @@ def visualise_returns(returns_df):
 
 
 def stationarity_check(returns_df):
+    """
+    Perform an Augmented Dickey-Fuller (ADF) test for stationarity on the series.
+    
+    Parameters
+    ----------
+    returns_df : pd.DataFrame
+        A DataFrame containing the daily returns of the SPX and Qi indices. The
+        DataFrame should have columns 'SPX_Return' and 'Qi_Return'.
+    
+    Returns
+    -------
+    list of dict
+        A list of dictionaries, each containing the results of the ADF test for a
+        given series. The dictionaries contain the keys 'Series', 'ADF Statistic',
+        'p-value', and 'Stationary'. The last of these is 'Yes' if the p-value is
+        less than or equal to 0.05 (i.e., the null hypothesis of non-stationarity
+        can be rejected at the 5% level), and 'No' otherwise.
+    """
     results = []
     for col in ['SPX_Return', 'Qi_Return']:
         result = adfuller(returns_df[col])
@@ -398,6 +769,24 @@ def stationarity_check(returns_df):
 
 
 def normality_check(returns_df):
+    """
+    Perform a Kolmogorov-Smirnov test for normality on the series.
+
+    Parameters
+    ----------
+    returns_df : pd.DataFrame
+        A DataFrame containing the daily returns of the SPX and Qi indices. The
+        DataFrame should have columns 'SPX_Return' and 'Qi_Return'.
+
+    Returns
+    -------
+    list of dict
+        A list of dictionaries, each containing the results of the Kolmogorov-Smirnov
+        test for a given series. The dictionaries contain the keys 'Series',
+        'KS Statistic', 'p-value', and 'Normal'. The last of these is 'Yes' if the
+        p-value is greater than 0.05 (i.e., the null hypothesis of normality can be
+        rejected at the 5% level), and 'No' otherwise.
+    """
     results = []
     for col in ['SPX_Return', 'Qi_Return']:
         stat, p_value = kstest(returns_df[col], 'norm')
@@ -411,6 +800,29 @@ def normality_check(returns_df):
 
 
 def heteroskedasticity_check(returns_df):
+    """
+    Perform a Breusch-Pagan test for heteroskedasticity on SPX and Qi returns.
+
+    This function tests for heteroskedasticity in the daily returns of the SPX
+    and Qi indices using the Breusch-Pagan test. It fits a linear regression model
+    to each return series and then applies the test to the residuals of the model.
+    The function returns the Lagrange Multiplier (LM) statistic and p-value for
+    each series, indicating whether heteroskedasticity is detected.
+
+    Parameters
+    ----------
+    returns_df : pd.DataFrame
+        A DataFrame containing the daily returns of the SPX and Qi indices. The
+        DataFrame should have columns 'SPX_Return' and 'Qi_Return'.
+
+    Returns
+    -------
+    list of dict
+        A list of dictionaries, each containing the results of the Breusch-Pagan
+        test for a given series. The dictionaries contain the keys 'Series', 'LM Statistic',
+        'p-value', and 'Heteroskedasticity Detected', which is 'Yes' if the p-value
+        is less than or equal to 0.05, and 'No' otherwise.
+    """
     results = []
     for col in ['SPX_Return', 'Qi_Return']:
         data = pd.DataFrame({'y': returns_df[col]})
@@ -427,6 +839,25 @@ def heteroskedasticity_check(returns_df):
 
 
 def create_acf_pacf_plots(returns_df):
+    """
+    Create ACF and PACF plots for each column in the returns DataFrame.
+
+    This function generates and saves Autocorrelation Function (ACF) and 
+    Partial Autocorrelation Function (PACF) plots for each return series 
+    in the provided DataFrame. The plots are saved as PNG files in the 
+    'exploratory_analysis' directory with filenames indicating the column 
+    name.
+
+    Parameters
+    ----------
+    returns_df : pd.DataFrame
+        A DataFrame containing the return series to be analyzed. Each column 
+        represents a different series.
+
+    Returns
+    -------
+    None
+    """
     for col in returns_df.columns:
         plt.figure(figsize=(12, 6))
 
@@ -453,6 +884,21 @@ def create_acf_pacf_plots(returns_df):
 
 
 def calculate_skew_kurtosis(data):
+    """
+    Calculate the skewness and kurtosis of a given DataFrame of returns.
+
+    Parameters
+    ----------
+    data : pd.DataFrame
+        A DataFrame containing the return series to be analyzed. Each column
+        represents a different series.
+
+    Returns
+    -------
+    pd.DataFrame
+        A DataFrame with two columns, 'Skewness' and 'Kurtosis', containing the
+        skewness and kurtosis of each column in the input DataFrame.
+    """
     skewness = data.skew()
     kurt = data.kurt()
     results_df = pd.DataFrame({'Skewness': skewness, 'Kurtosis': kurt})
@@ -460,6 +906,29 @@ def calculate_skew_kurtosis(data):
 
 
 def arch_test_results(returns_df, output_path="exploratory_analysis/arch_results.csv"):
+    """
+    Perform Engle's ARCH test on a given DataFrame of returns.
+
+    Parameters
+    ----------
+    returns_df : pd.DataFrame
+        A DataFrame containing the return series to be analyzed. Each column
+        represents a different series.
+    output_path : str (optional)
+        The path to save the results to. Defaults to
+        "exploratory_analysis/arch_results.csv".
+
+    Returns
+    -------
+    pd.DataFrame
+        A DataFrame with the results of the ARCH test for each column in the
+        input DataFrame. The columns of the returned DataFrame are:
+        - Column: the name of the column in the input DataFrame
+        - LM Statistic: the Lagrange multiplier statistic
+        - p-value: the p-value of the test
+        - F-Statistic: the F-statistic of the test
+        - F-Test p-value: the p-value of the F-test
+    """
     results = []
 
     for col in ['SPX_Return', 'Qi_Return']:
@@ -483,7 +952,25 @@ def arch_test_results(returns_df, output_path="exploratory_analysis/arch_results
 
 
 def perform_data_exploration():
-    # Read in data
+    """
+    Performs exploratory data analysis on a given DataFrame of returns.
+
+    This function reads in data from a CSV file, visualises the raw data and returns,
+    creates ACF and PACF plots, tests for stationarity, normality, and
+    heteroskedasticity, performs an ARCH test for heteroskedasticity in volatility,
+    calculates skewness and kurtosis, and saves the results to CSV files.
+
+    The results are saved in the "exploratory_analysis" folder, with the following
+    filenames:
+    - "stationarity_results.csv"
+    - "normality_results.csv"
+    - "heteroskedasticity_results.csv"
+    - "skew_kurtosis_results.csv"
+    - "arch_results.csv"
+
+    The function takes no parameters and returns nothing.
+
+    """
     returns_df = read_in_data()
 
     # Visualise data
@@ -525,6 +1012,30 @@ def perform_data_exploration():
 
 
 def granger_causality_test(x_data, y_data, max_lag=20, output_folder="further_analysis"):
+    """
+    Perform Granger causality test between two time series datasets.
+
+    This function conducts a Granger causality test to determine if one time series
+    can predict another. It evaluates multiple lags and returns the significant results.
+    The results are plotted and saved as a CSV file and a PNG plot.
+
+    Parameters
+    ----------
+    x_data : pd.Series
+        The first time series data to test for causality.
+    y_data : pd.Series
+        The second time series data to test for causality.
+    max_lag : int, optional
+        The maximum number of lags to consider. Default is 20.
+    output_folder : str, optional
+        The folder path to save the results. Default is "further_analysis".
+
+    Returns
+    -------
+    dict
+        A dictionary where keys are lag values and values are p-values for
+        significant Granger causality results (p < 0.05).
+    """
     results = grangercausalitytests(
         pd.concat([x_data, y_data], axis=1), maxlag=max_lag, verbose=False
     )
@@ -566,7 +1077,29 @@ def granger_causality_test(x_data, y_data, max_lag=20, output_folder="further_an
 
 
 def perform_var_impulse_response_analysis(returns_df, output_folder="further_analysis"):
-    # Perform Granger causality test to determine significant lags
+    """
+    Perform Vector Autoregression (VAR) analysis and compute the impulse response function (IRF).
+
+    This function performs the following steps:
+    1. Compute the Granger causality test to determine the significant lags.
+    2. Fit a VAR model to the data using the determined lag order.
+    3. Extract the model coefficients and p-values.
+    4. Save the coefficients and p-values to a CSV file.
+    5. Compute the impulse response function (IRF) of the model.
+    6. Plot the IRF and save the plot to a PNG file.
+
+    Parameters
+    ----------
+    returns_df : pd.DataFrame
+        A DataFrame containing the daily returns of the SPX and Qi indices.
+    output_folder : str (optional)
+        The folder to save the results to. Defaults to "further_analysis".
+
+    Returns
+    -------
+    irf : pd.Series
+        The impulse response function of the model.
+    """
     significant_lags = granger_causality_test(returns_df['Qi_Return'], returns_df['SPX_Return'])
     lag_order = max(significant_lags.keys()) if significant_lags else 1
 
@@ -601,23 +1134,83 @@ def perform_var_impulse_response_analysis(returns_df, output_folder="further_ana
     return irf
 
 
-def plot_cumulative_returns(returns_df, spx_col='SPX_Return', qi_col='Qi_Return', output_folder="further_analysis"):
-    # Calculate cumulative returns
+def plot_cumulative_returns(returns_df, spx_col='SPX_Return', qi_col='Qi_Return',
+                            output_folder="further_analysis", zoom_range=None):
+    """
+    Plot the cumulative returns of SPX and QI over time.
+
+    Parameters
+    ----------
+    returns_df : pd.DataFrame
+        A DataFrame containing the daily returns of the SPX and Qi indices. The
+        DataFrame should have columns 'SPX_Return' and 'Qi_Return'.
+    spx_col : str, optional
+        The column name of the SPX returns. Defaults to 'SPX_Return'.
+    qi_col : str, optional
+        The column name of the Qi returns. Defaults to 'Qi_Return'.
+    output_folder : str, optional
+        The folder in which to save the plot. Defaults to "further_analysis".
+    zoom_range : tuple, optional
+        A tuple of two integers, representing the start and end dates (inclusive)
+        for which to plot the cumulative returns. If provided, the plot will be
+        zoomed in on this range. Otherwise, the entire range of returns will be
+        plotted.
+
+    Returns
+    -------
+    None
+    """
     cumulative_spx = (1 + returns_df[spx_col]).cumprod() - 1
     cumulative_qi = (1 + returns_df[qi_col]).cumprod() - 1
+
+    # Apply zoom range if provided
+    if zoom_range is not None:
+        start, end = zoom_range
+        cumulative_spx = cumulative_spx.iloc[start:end]
+        cumulative_qi = cumulative_qi.iloc[start:end]
 
     # Plot the cumulative returns
     plt.figure(figsize=(12, 6))
     plt.plot(cumulative_spx, label='Cumulative SPX Returns', color='blue')
     plt.plot(cumulative_qi, label='Cumulative QI Returns', color='orange')
-    plt.title('Cumulative Product of Returns of SPX and QI')
+    plt.title(
+        'Cumulative Product of Returns of SPX and QI (Zoomed In)' if zoom_range else 'Cumulative Product of Returns of SPX and QI')
     plt.xlabel('Date')
     plt.ylabel('Cumulative Return')
     plt.legend()
-    save_plot("cumulative_returns.png", output_folder)
+
+    # Save the plot
+    plot_name = "cumulative_returns_zoomed.png" if zoom_range else "cumulative_returns.png"
+    save_plot(plot_name, output_folder)
 
 
 def volatility_weighted_var(returns, confidence_level=0.95, max_value=10, output_folder="further_analysis"):
+    """
+    Calculate volatility weighted VaR using the GARCH model.
+
+    Parameters
+    ----------
+    returns : pd.Series
+        A series of daily returns.
+    confidence_level : float, optional
+        The confidence level for the VaR calculation. Defaults to 0.95.
+    max_value : int, optional
+        The maximum number of autoregressive and moving average terms to
+        consider, by default 10.
+    output_folder : str, optional
+        The folder in which to save the plot. Defaults to "further_analysis".
+
+    Returns
+    -------
+    float
+        The calculated VaR.
+
+    Notes
+    -----
+    The VaR is calculated by fitting an ARMA-GARCH model to the data and then
+    using the latest conditional volatility to adjust the historical returns.
+    The percentile of the adjusted returns is then used to calculate the VaR.
+    """
     best_aic = float('inf')
     best_model = None
 
@@ -669,6 +1262,30 @@ def volatility_weighted_var(returns, confidence_level=0.95, max_value=10, output
 
 
 def rolling_analysis(returns_df, rolling_window=252, risk_free_rate=0.02, output_folder="further_analysis"):
+    """
+    Calculate rolling metrics over the returns of the Qi and SPX portfolios.
+
+    Parameters
+    ----------
+    returns_df : pd.DataFrame
+        A DataFrame containing the daily returns of the Qi and SPX portfolios.
+    rolling_window : int, optional
+        The rolling window size (in days) for the calculations. Default is 252.
+    risk_free_rate : float, optional
+        The annual risk-free rate. Default is 0.02.
+    output_folder : str, optional
+        The folder to save the results to. Default is "further_analysis".
+
+    Returns
+    -------
+    pd.DataFrame
+        A DataFrame containing the rolling metrics, with columns:
+            - Rolling_Excess_Return: the excess return of Qi over SPX
+            - Rolling_Tracking_Error: the tracking error of Qi to SPX
+            - Rolling_Information_Ratio: the information ratio of Qi to SPX
+            - Rolling_Sharpe_Qi: the Sharpe ratio of Qi
+            - Rolling_Sharpe_SPX: the Sharpe ratio of SPX
+    """
     results = pd.DataFrame(index=returns_df.index)
 
     # Rolling metrics
@@ -700,11 +1317,24 @@ def rolling_analysis(returns_df, rolling_window=252, risk_free_rate=0.02, output
 
 
 def further_analysis():
-    # Read in returns data
+    """
+    Conduct further financial analysis on the SPX and Qi returns.
+
+    This function performs several analyses on the returns data, including:
+    - Creating cumulative returns plots for the entire data and a zoomed-in version.
+    - Performing VAR impulse response analysis.
+    - Computing and saving the Value at Risk (VaR) for SPX and Qi to a CSV file.
+    - Calculating rolling metrics such as excess return, tracking error, information ratio, and Sharpe ratios.
+    - Plotting and saving figures for the rolling metrics over time.
+
+    The results and plots are saved in the 'further_analysis' directory.
+    """
     returns_df = read_in_data()
 
     # Create cumulative returns plot
     plot_cumulative_returns(returns_df)
+    # Make a zoomed in version
+    plot_cumulative_returns(returns_df, zoom_range=(1000, 1100))
 
     # Perform VAR impulse response analysis
     perform_var_impulse_response_analysis(returns_df)
@@ -762,6 +1392,24 @@ def further_analysis():
 
 
 def install_requirements():
+    """
+    Installs all packages specified in the requirements.txt file using pip.
+
+    This function will attempt to install all packages listed in the
+    requirements.txt file using pip. If any of the installations fail,
+    an error message will be displayed. If pip is not found in the
+    system's PATH environment, a FileNotFoundError will be raised, and
+    a message will be displayed asking the user to ensure pip is
+    installed and added to their PATH environment.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    None
+    """
     try:
         subprocess.check_call(["pip", "install", "-r", "requirements.txt"])
         print("All requirements installed successfully!")
